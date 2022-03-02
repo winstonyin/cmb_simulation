@@ -2,7 +2,11 @@ from binascii import a2b_hqx
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sp
+import multiprocessing
+from multiprocessing import Pool
 import camb
+
+multiprocessing.set_start_method('fork') # Necessary for python 3.8 on macOS
 
 planck_params = (45, 45*np.sqrt(2), 5)
 simons_params = (7, 7*np.sqrt(2), 1.4)
@@ -345,6 +349,16 @@ class CMBGenerator:
         self.p = CMBMap(self.W, self.N, fourier_map=samples[:,:,2])
         self.B_prim = CMBMap(self.W, self.N, fourier_map=np.zeros((self.N, self.N//2+1), dtype='complex_'))
 
+    def C_TT_n(self, l):
+        const = self.fwhm**2/(8*np.log(2))
+        return self.D_T**2*np.exp(l**2*const)
+
+    def C_EE_n(self, l):
+        const = self.fwhm**2/(8*np.log(2))
+        return self.D_P**2*np.exp(l**2*const)
+
+    C_BB_n = C_EE_n
+
     def setNoiseMaps(self, D_T, D_P, fwhm):
         '''
         D_T, D_P given in muK arcmin
@@ -353,13 +367,9 @@ class CMBGenerator:
         Simons: 7, 7*np.sqrt(2), 1.4
         CMB-S4: 1, np.sqrt(2), 1.4
         '''
-        D_T = D_T*np.pi/180/60 # unit conversion to radians
-        D_P = D_P*np.pi/180/60
-        fwhm = fwhm*np.pi/180/60
-        const = fwhm**2/(8*np.log(2))
-        self.C_TT_n = np.vectorize(lambda l: D_T**2*np.exp(l**2*const))
-        self.C_EE_n = np.vectorize(lambda l: D_P**2*np.exp(l**2*const))
-        self.C_BB_n = np.vectorize(lambda l: D_P**2*np.exp(l**2*const))
+        self.D_T = D_T*np.pi/180/60 # unit conversion to radians
+        self.D_P = D_P*np.pi/180/60
+        self.fwhm = fwhm*np.pi/180/60
 
         samples = np.zeros((self.N, self.N//2+1, 3), dtype='complex_')
         for i, j in np.ndindex(self.N, self.N//2+1):
@@ -460,15 +470,15 @@ class CMBGenerator:
         U_rot = CMBMap(self.W, self.N, real_map=U_rot_real)
         self.E_rot, self.B_rot = self.QU2EB(Q_rot, U_rot)
 
-    def convolveIntegralTerm(self, factor1, factor2):
+    def convolveIntegralTerm(self, factors):
         '''
-        Each factor: (N, N//2+1, 2, ..., 2) in discrete Fourier space
+        Each factor: 2-tuple of ndarrays (N, N//2+1, 2, ..., 2) in discrete Fourier space
         Returns the discrete Fourier space convolution integral (single term) between them as (N, N//2+1)
         by multiplying their real space maps and then Fourier transformed,
         where remaining dimensions are dotted with L
         '''
-        factor1_real = np.fft.irfft2(factor1, s=(self.N, self.N), axes=(0,1))
-        factor2_real = np.fft.irfft2(factor2, s=(self.N, self.N), axes=(0,1))
+        factor1_real = np.fft.irfft2(factors[0], s=(self.N, self.N), axes=(0,1))
+        factor2_real = np.fft.irfft2(factors[1], s=(self.N, self.N), axes=(0,1))
         free_dims = factor1_real.ndim - factor2_real.ndim # excess dimensions to be dotted with L, assumed to all be in one factor
         shape = [2] * (abs(free_dims)+2)
         shape[:2] = (self.N, self.N)
@@ -492,9 +502,11 @@ class CMBGenerator:
     def convolveIntegral(self, factors):
         '''
         Returns one full convolution integral (all terms summed)
-        factors: array of 2-tuples of individual factors
+        factors: list of 2-tuples of individual factors
         '''
-        return sum([self.convolveIntegralTerm(f1, f2) for f1, f2 in factors])
+        with Pool() as pool:
+            terms = pool.map(self.convolveIntegralTerm, factors)
+        return sum(terms)
 
     def lensingEstimator(self, factors_est, factors_norm):
         integral_est_fourier = self.convolveIntegral(factors_est)
