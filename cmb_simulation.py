@@ -652,3 +652,47 @@ class CMBGenerator:
         factors_norm = expandProd(f_factor1, f_factor2, f_factor1, f_factor2, denom, convert)
 
         return factors_est, factors_norm
+
+    def rotation_TE(self, null=False, lensed=True):
+        '''
+        null: True if there's no rotation in the input maps, False if there is
+        lensed: whether the input maps are lensed
+        '''
+        ls = self.ls_grid.copy()
+        norm_ls = self.norm_ls_grid.copy()
+        norm_ls[0,0] = 1e-10 # to avoid /0
+        if lensed:
+            C_TT = self.C_TT_lensed(norm_ls)
+            C_EE = self.C_EE_lensed(norm_ls)
+            C_TE = self.C_TE_lensed(norm_ls)
+        else:
+            C_TT = self.C_TT(norm_ls)
+            C_EE = self.C_EE(norm_ls)
+            C_TE = self.C_TE_lensed(norm_ls)
+        C_TT_n = self.C_TT_n(norm_ls)
+        C_EE_n = self.C_EE_n(norm_ls)
+        phi_l = getAngles(ls)
+        cos2phi = np.cos(2*phi_l)
+        sin2phi = np.sin(2*phi_l)
+        if null:
+            if lensed:
+                T = self.T_lensed.fourier + self.T_noise.fourier
+                E = self.E_lensed.fourier + self.E_noise.fourier
+            else:
+                T = self.T_prim.fourier + self.T_noise.fourier
+                E = self.E_prim.fourier + self.E_noise.fourier
+        else:
+            T = self.T_rot.fourier + self.T_noise.fourier
+            E = self.E_rot.fourier + self.E_noise.fourier
+        ones = np.ones((self.N, self.N//2+1))
+
+        qe = [(T, E)]
+        f_factor1 = [(-2 * C_TE, ones)]
+        f_factor2 = [(cos2phi, cos2phi), (sin2phi, sin2phi)]
+        denom = [(1 / (C_TT + C_TT_n), 1 / (C_EE + C_EE_n))]
+        convert = [(ones * (self.N/self.W)**2, ones * (self.N/self.W)**2)]
+
+        factors_est = expandProd(qe, f_factor1, f_factor2, denom)
+        factors_norm = expandProd(f_factor1, f_factor2, f_factor1, f_factor2, denom, convert)
+
+        return factors_est, factors_norm
