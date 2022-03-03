@@ -521,6 +521,28 @@ class CMBGenerator:
 
     rotationEstimator = lensingEstimator
 
+    def lensing_TT(self, null=False):
+        ls = self.ls_grid.copy()
+        norm_ls = self.norm_ls_grid.copy()
+        norm_ls[0,0] = 1e-10 # to avoid /0
+        C_TT = self.C_TT(norm_ls)
+        C_TT_n = self.C_TT_n(norm_ls)
+        if null:
+            T = self.T_prim.fourier + self.T_noise.fourier
+        else:
+            T = self.T_lensed.fourier + self.T_noise.fourier
+        ones = np.ones((self.N, self.N//2+1))
+
+        qe = [(T, T)]
+        f = [(tensorProd(C_TT, ls), ones), (ones, tensorProd(C_TT, ls))] # put this factor towards the end for dotting with L
+        denom = [(1 / (C_TT + C_TT_n), 1 / (C_TT + C_TT_n))]
+        convert = [(ones * (self.N/self.W)**2, ones * (self.N/self.W)**2)] # need to convert to discrete Fourier before FFT convolve
+
+        factors_est = expandProd(qe, denom, f)
+        factors_norm = expandProd(denom, convert, f, f)
+
+        return factors_est, factors_norm
+
     def lensing_EB(self, null=False):
         '''
         Factors of ls to be dottted with Ls must be towards the end (right)
