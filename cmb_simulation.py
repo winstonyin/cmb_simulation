@@ -48,11 +48,27 @@ def sampleCov(chol):
 
     chol
         (n, m, m) array consisting of n m-by-m lower triangular matrix (Cholesky decomposition of the covariant matrix)
+        or (n,) array for 1d Gaussian sampling
     '''
+    if chol.ndim == 1:
+        chol = chol.reshape(chol.size, 1)
     shape = chol.shape[:2] # l-modes, TEBp, real/imag
     normals = (np.random.standard_normal(shape) + 1j*np.random.standard_normal(shape))/np.sqrt(2)
     ret = np.array([chol[i]@normals[i] for i in range(chol.shape[0])])
     return ret
+
+def sampleSpec(d, N, spec, ml=None):
+    '''
+    Fourier space sampling, FFT normalisation included
+
+    spec : Spectrum
+    '''
+    if ml is None:
+        ml = modl(*get_ls(d, N))
+    ml_flat = ml.reshape(-1)
+    chol = np.sqrt(spec(ml_flat))
+    ret_flat = sampleCov(chol) * N/d
+    return ret_flat.reshape(ml.shape)
 
 def binnedCorrelation(X, Y, delta=20):
     '''
@@ -67,18 +83,23 @@ class Spectrum:
     '''
     def __init__(self, spec):
         '''
-        cl : func
+        spec : func
             Power spectrum, function of l, assume already vectorized
         '''
         self.spec = spec
 
-    def __call__(self, ls):
+    def __call__(self, l):
         '''
         Spectrum objects can be called directly for evaluation at ls
         '''
-        return self.spec(ls)
+        return self.spec(l)
 
-    def sample(self, ls):
+    def __add__(self, other):
+        def spec(l):
+            return self.spec(l) + other.spec(l)
+        return Spectrum(spec)
+
+    def sample(self, l):
         '''
         Generate samples of random complex Gaussians based on spec(ls).
         Variance is spec(l) (factor N**4/W**2 for FFT normalisation is not included)
@@ -86,15 +107,22 @@ class Spectrum:
 
         ls : 1d array
         '''
-        Cls = self.spec(ls)
-        samples = np.random.standard_normal((ls.size, 2))
+        Cls = self.spec(l)
+        samples = np.random.standard_normal((l.size, 2))
         ret = (samples[:,0] + 1j*samples[:,1]) * np.sqrt(Cls/2) # /2 for real and imag parts
         return ret
 
-    def plot(self, ls, scale=lambda l: 1, **kwargs):
+    def plot(self, ls, scale=lambda l: 1, logaxis=None, **kwargs):
         Cls = self.spec(ls)
         scale_arr = np.vectorize(scale)(ls)
-        plt.plot(ls, Cls * scale_arr, **kwargs)
+        if logaxis is None:
+            plt.plot(ls, Cls * scale_arr, **kwargs)
+        elif logaxis == 'x':
+            plt.semilogx(ls, Cls * scale_arr, **kwargs)
+        elif logaxis == 'y':
+            plt.semilogy(ls, Cls * scale_arr, **kwargs)
+        elif logaxis == 'both':
+            plt.loglog(ls, Cls * scale_arr, **kwargs)
 
 class InterpSpectrum(Spectrum):
     '''
@@ -137,6 +165,62 @@ class CMBMap:
 
     def plot(self, **kwargs):
         plt.imshow(self.r, **kwargs)
+
+class TEB:
+    def __init__(self, T, E, B):
+        '''
+        T, E, B : CMBMap
+        '''
+        self.d = T.d
+        self.N = T.N
+        self.T = T
+        self.E = E
+        self.B = B
+        self.lx, self.ly = self.get_ls()
+        self.ml = modl(self.lx, self.ly)
+
+    def get_ls(self):
+        return get_ls(self.d, self.N)
+
+    def getTQU(self):
+        E_f = self.E.f
+        B_f = self.B.f
+        phi_l = np.arctan2(self.ly, self.lx) # tan(angle) = ly/lx
+        sin2phi = np.sin(2*phi_l)
+        cos2phi = np.cos(2*phi_l)
+        Q_f = E_f * cos2phi - B_f * sin2phi
+        U_f = E_f * sin2phi + B_f * cos2phi
+        Q = CMBMap(self.d, self.N, fourier=Q_f)
+        U = CMBMap(self.d, self.N, fourier=U_f)
+        return TQU(self.T, Q, U) # deep copy T?
+
+class TQU:
+    def __init__(self, T, Q, U):
+        '''
+        T, Q, U : CMBMap
+        '''
+        self.d = T.d
+        self.N = T.N
+        self.T = T
+        self.Q = Q
+        self.U = U
+        self.lx, self.ly = self.get_ls()
+        self.ml = modl(self.lx, self.ly)
+
+    def get_ls(self):
+        return get_ls(self.d, self.N)
+
+    def getTEB(self):
+        Q_f = self.Q.f
+        U_f = self.U.f
+        phi_l = np.arctan2(self.ly, self.lx)
+        sin2phi = np.sin(2*phi_l)
+        cos2phi = np.cos(2*phi_l)
+        E_f = Q_f * cos2phi + U_f * sin2phi
+        B_f = - Q_f * sin2phi + U_f * cos2phi
+        E = CMBMap(self.d, self.N, fourier=E_f)
+        B = CMBMap(self.d, self.N, fourier=B_f)
+        return TEB(self.T, E, B) # deep copy T?
 
 class Averager:
     def __init__(self, d, arr, delta):
@@ -247,56 +331,65 @@ class CMBSpectra:
         p = CMBMap(d, N, fourier=p_f)
         return TEB(T, E, B), p
 
-class TEB:
-    def __init__(self, T, E, B):
+planck_params = (45, 45*np.sqrt(2), 5)
+simons_params = (7, 7*np.sqrt(2), 1.4)
+cmb_s4_params = (1, np.sqrt(2), 1.4)
+
+class Detector:
+    def __init__(self, D_T, D_P, fwhm):
         '''
-        T, E, B : CMBMap
+        D_T, D_P, fwhm: float
+            In arcmin
         '''
-        self.d = T.d
-        self.N = T.N
-        self.T = T
-        self.E = E
-        self.B = B
+        arcmin = 1/60/180*np.pi
+        self.D_T = D_T * arcmin
+        self.D_P = D_P * arcmin
+        self.fwhm = fwhm * arcmin
+        self.TTn = Spectrum(self.TTn_fun)
+        self.EEn = Spectrum(self.EEn_fun)
+        self.BBn = self.EEn
 
-    def get_ls(self):
-        return get_ls(self.d, self.N)
-
-    def getTQU(self):
-        E_f = self.E.f
-        B_f = self.B.f
-        lx, ly = self.get_ls()
-        phi_l = np.arctan2(ly, lx) # tan(angle) = ly/lx
-        sin2phi = np.sin(2*phi_l)
-        cos2phi = np.cos(2*phi_l)
-        Q_f = E_f * cos2phi - B_f * sin2phi
-        U_f = E_f * sin2phi + B_f * cos2phi
-        Q = CMBMap(self.d, self.N, fourier=Q_f)
-        U = CMBMap(self.d, self.N, fourier=U_f)
-        return TQU(self.T, Q, U) # deep copy T?
-
-class TQU:
-    def __init__(self, T, Q, U):
+    def TTn_fun(self, l):
         '''
-        T, Q, U : CMBMap
+        Beam deconvoluted noise in Fourier space
         '''
-        self.d = T.d
-        self.N = T.N
-        self.T = T
-        self.Q = Q
-        self.U = U
+        return self.D_T**2 / self.beam(l)**2
 
-    def get_ls(self):
-        return get_ls(self.d, self.N)
+    def EEn_fun(self, l):
+        return self.D_P**2 / self.beam(l)**2
 
-    def getTEB(self):
-        Q_f = self.Q.f
-        U_f = self.U.f
-        lx, ly = self.get_ls()
-        phi_l = np.arctan2(ly, lx)
-        sin2phi = np.sin(2*phi_l)
-        cos2phi = np.cos(2*phi_l)
-        E_f = Q_f * cos2phi + U_f * sin2phi
-        B_f = - Q_f * sin2phi + U_f * cos2phi
-        E = CMBMap(self.d, self.N, fourier=E_f)
-        B = CMBMap(self.d, self.N, fourier=B_f)
-        return TEB(self.T, E, B) # deep copy T?
+    def beam(self, l):
+        '''
+        Beam profile in Fourier space
+        '''
+        return np.exp(-l**2 * self.fwhm**2 / (16 * np.log(2)))
+
+    def beamConvolve(self, teb):
+        beam_f = self.beam(teb.ml)
+        T = CMBMap(teb.d, teb.N, fourier=teb.T.f*beam_f)
+        E = CMBMap(teb.d, teb.N, fourier=teb.E.f*beam_f)
+        B = CMBMap(teb.d, teb.N, fourier=teb.B.f*beam_f)
+        return TEB(T, E, B)
+
+    def beamDeconvolve(self, teb):
+        beam_f = self.beam(teb.ml)
+        T = CMBMap(teb.d, teb.N, fourier=teb.T.f/beam_f)
+        E = CMBMap(teb.d, teb.N, fourier=teb.E.f/beam_f)
+        B = CMBMap(teb.d, teb.N, fourier=teb.B.f/beam_f)
+        return TEB(T, E, B)
+
+    def addNoise(self, teb):
+        '''
+        Add detector noise to TEB maps. First convolve with beam profile,
+        add white noise per real space pixel, then deconvolve with beam profile.
+        '''
+        tqu = self.beamConvolve(teb).getTQU()
+        T_noise_r = np.random.standard_normal((tqu.N, tqu.N)) * self.D_T / tqu.d
+        Q_noise_r = np.random.standard_normal((tqu.N, tqu.N)) * self.D_P / tqu.d
+        U_noise_r = np.random.standard_normal((tqu.N, tqu.N)) * self.D_P / tqu.d
+        T_obs = CMBMap(tqu.d, tqu.N, real=tqu.T.r + T_noise_r)
+        Q_obs = CMBMap(tqu.d, tqu.N, real=tqu.Q.r + Q_noise_r)
+        U_obs = CMBMap(tqu.d, tqu.N, real=tqu.U.r + U_noise_r)
+        tqu_obs = TQU(T_obs, Q_obs, U_obs)
+        teb_obs = self.beamDeconvolve(tqu_obs.getTEB())
+        return teb_obs
