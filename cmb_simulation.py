@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, RectBivariateSpline
 import matplotlib.pyplot as plt
 import camb
 
@@ -33,6 +33,17 @@ def get_ls(d, N):
     x_freqs = np.fft.rfftfreq(N, d) * 2*np.pi
     y_freqs = np.fft.fftfreq(N, d) * 2*np.pi
     return np.meshgrid(x_freqs, y_freqs)
+
+def get_ls_old(W, N):
+    '''
+    Returns N by N//2+1 array of (lx, ly) Fourier space coords
+    First side is 0 -- positive modes -- negative modes
+    Second side is 0 -- positive modes including Nyquist
+    l = 2*np.pi*k/W, where k = 0,...,N-1
+    '''
+    l0 = np.fft.fftfreq(N, W/N/2/np.pi)
+    l1 = np.fft.rfftfreq(N, W/N/2/np.pi)
+    return np.array([[(x, y) for y in l1] for x in l0])
 
 def modl(lx, ly):
     '''
@@ -76,6 +87,14 @@ def binnedCorrelation(X, Y, delta=20):
     '''
     prod = (X.f * Y.f.conj()).real * (X.d/X.N)**2
     return Averager(X.d, prod, delta)
+
+def plot2Maps(real_map1, real_map2, title1='', title2=''):
+    fig, ax = plt.subplots(1, 2, figsize=(16,8))
+    ax[0].imshow(real_map1)
+    ax[0].set_title(title1)
+    ax[1].imshow(real_map2)
+    ax[1].set_title(title2)
+    plt.show()
 
 class Spectrum:
     '''
@@ -151,7 +170,7 @@ class CMBMap:
 
     def setFourier(self, fourier):
         self.f = fourier # should copy() ?
-        self.r = np.fft.irfft2(fourier)
+        self.r = np.fft.irfft2(fourier, s=(self.N, self.N))
 
     def setReal(self, real):
         self.r = real
@@ -393,3 +412,87 @@ class Detector:
         tqu_obs = TQU(T_obs, Q_obs, U_obs)
         teb_obs = self.beamDeconvolve(tqu_obs.getTEB())
         return teb_obs
+
+def grad(p):
+    '''
+    Calculate gradient field of CMBMap.
+    Return two CMBMap's.
+
+    p : CMBMap
+        Lensing potential
+    '''
+    lx, ly = p.get_ls()
+    delx = CMBMap(p.d, p.N, fourier=p.f * 1j*lx)
+    dely = CMBMap(p.d, p.N, fourier=p.f * 1j*ly)
+    return delx, dely
+
+def lensInterp(cmbmap, p):
+    '''
+    Interp
+    '''
+    d = cmbmap.d
+    N = cmbmap.N
+    deflx, defly = grad(p) # radians
+    inds = np.arange(N)
+    indx, indy = np.meshgrid(inds, inds)
+    map_interp = RectBivariateSpline(inds, inds, cmbmap.r) # y, x
+    new_map = map_interp(indy+defly.r/d, indx+deflx.r/d, grid=False) # pixel units
+    return CMBMap(d, N, real=new_map)
+
+def lensTaylor(cmbmap, p):
+    d = cmbmap.d
+    N = cmbmap.N
+    del1x, del1y = grad(cmbmap)
+    del2xx, del2xy = grad(del1x)
+    del2yx, del2yy = grad(del1y)
+    deflx, defly = grad(p)
+    order0 = cmbmap.r
+    order1 = del1x.r*deflx.r + del1y.r*defly.r
+    order2 = 0.5 * (del2xx.r*deflx.r*deflx.r + del2xy.r*deflx.r*defly.r + del2yx.r*defly.r*deflx.r + del2yy.r*defly.r*defly.r)
+    return CMBMap(d, N, real=order0+order1+order2)
+
+def lensNearest(cmbmap, p):
+    '''
+    Return lensed CMBMap given lensing potential
+
+    cmbmap : CMBMap
+        Primordial, without noise
+    p : CMBMap
+        Lensing potential
+    '''
+    d = cmbmap.d
+    N = cmbmap.N
+    del1x, del1y = grad(cmbmap)
+    del2xx, del2xy = grad(del1x)
+    del2yx, del2yy = grad(del1y)
+
+    deflx, defly = grad(p) # deflection field in radians
+    inds = np.arange(N)
+    indx, indy = np.meshgrid(inds, inds)
+    lensedx = indx + deflx.r / d # pixel units
+    lensedy = indy + defly.r / d
+    nearest_prex = np.rint(lensedx).astype(int)
+    nearest_prey = np.rint(lensedy).astype(int)
+    deltax = (lensedx - nearest_prex) * d # back to radians
+    deltay = (lensedy - nearest_prey) * d
+    nearestx = nearest_prex % N # periodic boundary condition
+    nearesty = nearest_prey % N
+
+    lensed_map_real = np.zeros((N, N))
+    for i, j in np.ndindex(N, N):
+        ind = (nearesty[i,j], nearestx[i,j])
+        order0 = cmbmap.r[ind]
+        dx = deltax[ind]
+        dy = deltay[ind]
+        order1 = del1x.r[ind]*dx + del1y.r[ind]*dy
+        order2 = 0.5 * (del2xx.r[ind]*dx*dx + del2xy.r[ind]*dx*dy + del2yx.r[ind]*dy*dx + del2yy.r[ind]*dy*dy)
+        lensed_map_real[i,j] = order0 + order1 + order2
+    return CMBMap(d, N, real=lensed_map_real)
+
+def lensTEB(teb, p, fun=lensTaylor):
+    tqu = teb.getTQU()
+    T_len = fun(tqu.T, p)
+    Q_len = fun(tqu.Q, p)
+    U_len = fun(tqu.U, p)
+    teb_len = TQU(T_len, Q_len, U_len).getTEB()
+    return teb_len
