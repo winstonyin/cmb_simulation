@@ -459,7 +459,7 @@ def lensTaylor(cmbmap, p):
 
     return CMBMap(d, N, real=order0+order1+order2+order3)
 
-def lensNearest(cmbmap, p):
+def lensTaylorNearest(cmbmap, p):
     '''
     Return lensed CMBMap given lensing potential
 
