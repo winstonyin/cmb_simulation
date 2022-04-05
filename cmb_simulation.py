@@ -3,6 +3,12 @@ from scipy.interpolate import interp1d, RectBivariateSpline
 import matplotlib.pyplot as plt
 import camb
 
+def scale2(l):
+    return l*(l+1)/(2*np.pi)
+
+def scale4(l):
+    return l**4/(2*np.pi)
+
 def getCambSpectra(lmax=7000):
     '''
     Generate and save CMB power spectra using CAMB
@@ -318,7 +324,7 @@ class CMBSpectra:
 
     def generatePrimordialMaps(self, d, N):
         '''
-        Returns a TEB and a separate CMBMap for p whose FFT modes are sampled from the unlensed spectra stored here
+        Return a TEB whose FFT modes are sampled from the unlensed spectra stored here
 
         d : float
             Pixel width
@@ -334,14 +340,22 @@ class CMBSpectra:
         T_f[0,0] = 0
         E_f = samples[:,1].reshape(ml.shape)
         E_f[0,0] = 0
-        p_f = sampleSpec(d, N, self.pp, ml_flat).reshape(ml.shape)
-        p_f[0,0] = 0
         B_f = np.zeros(ml.shape, dtype='complex_')
         T = CMBMap(d, N, fourier=T_f)
         E = CMBMap(d, N, fourier=E_f)
         B = CMBMap(d, N, fourier=B_f)
-        p = CMBMap(d, N, fourier=p_f)
-        return TEB(T, E, B), p
+        return TEB(T, E, B)
+
+    def generateLensingPotential(self, d, N):
+        '''
+        Return a CMBMap for lensing potential uncorrelated with the unlensed TEB
+        '''
+        lx, ly = get_ls(d, N)
+        ml = modl(lx, ly)    
+        ml_flat = ml.reshape(-1)
+        p_f = sampleSpec(d, N, self.pp, ml_flat).reshape(ml.shape)
+        p_f[0,0] = 0
+        return CMBMap(d, N, fourier=p_f)
 
 planck_params = (45, 45*np.sqrt(2), 5)
 simons_params = (7, 7*np.sqrt(2), 1.4)
@@ -504,3 +518,7 @@ def lensTEB(teb, p, fun=lensTaylor):
     U_len = fun(tqu.U, p)
     teb_len = TQU(T_len, Q_len, U_len).getTEB()
     return teb_len
+
+class Estimator:
+    def __init__(self):
+        pass
