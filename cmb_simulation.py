@@ -11,6 +11,7 @@ def getCambSpectra(lmax=7000):
         Maximum multipole (becomes unphysical beyond 7000)
     '''
     pars = camb.CAMBparams()
+    # pars.set_accuracy(AccuracyBoost=2)
     pars.set_cosmology(H0=67.4, ombh2=0.0224, omch2=0.12, mnu=0.06, omk=0, tau=0.054)
     pars.InitPower.set_params(As=2e-9, ns=0.965, r=0)
     pars.set_for_lmax(lmax, lens_potential_accuracy=2) # lens_potential_accuracy=1 is Planck accuracy. See doc
@@ -22,7 +23,7 @@ def getCambSpectra(lmax=7000):
 
 def get_ls(d, N):
     '''
-    Return real FFT l-coords.
+    Return real FFT lx, ly coords.
     Convention: first index is y (vertical), second index is x (horizontal)
 
     d : float
@@ -33,17 +34,6 @@ def get_ls(d, N):
     x_freqs = np.fft.rfftfreq(N, d) * 2*np.pi
     y_freqs = np.fft.fftfreq(N, d) * 2*np.pi
     return np.meshgrid(x_freqs, y_freqs)
-
-def get_ls_old(W, N):
-    '''
-    Returns N by N//2+1 array of (lx, ly) Fourier space coords
-    First side is 0 -- positive modes -- negative modes
-    Second side is 0 -- positive modes including Nyquist
-    l = 2*np.pi*k/W, where k = 0,...,N-1
-    '''
-    l0 = np.fft.fftfreq(N, W/N/2/np.pi)
-    l1 = np.fft.rfftfreq(N, W/N/2/np.pi)
-    return np.array([[(x, y) for y in l1] for x in l0])
 
 def modl(lx, ly):
     '''
@@ -70,7 +60,7 @@ def sampleCov(chol):
 
 def sampleSpec(d, N, spec, ml=None):
     '''
-    Fourier space sampling, FFT normalisation included
+    Fourier space sampling for a single spectrum, FFT normalisation included
 
     spec : Spectrum
     '''
@@ -90,9 +80,9 @@ def binnedCorrelation(X, Y, delta=20):
 
 def plot2Maps(real_map1, real_map2, title1='', title2=''):
     fig, ax = plt.subplots(1, 2, figsize=(16,8))
-    ax[0].imshow(real_map1)
+    ax[0].imshow(real_map1, origin='lower')
     ax[0].set_title(title1)
-    ax[1].imshow(real_map2)
+    ax[1].imshow(real_map2, origin='lower')
     ax[1].set_title(title2)
     plt.show()
 
@@ -154,7 +144,7 @@ class InterpSpectrum(Spectrum):
         '''
         self.power = power
         ls = np.arange(power.shape[0])
-        self.spec = interp1d(ls, power) # use bounds_error=False, fill_value=0 or not?
+        self.spec = interp1d(ls, power, bounds_error=False, fill_value=0) # use bounds_error=False, fill_value=0 or not?
 
 class CMBMap:
     '''
@@ -167,6 +157,9 @@ class CMBMap:
             self.setFourier(fourier)
         elif real is not None:
             self.setReal(real)
+
+    def copy(self):
+        return CMBMap(self.d, self.N, real=self.r.copy())
 
     def setFourier(self, fourier):
         self.f = fourier # should copy() ?
@@ -183,7 +176,7 @@ class CMBMap:
         return binnedCorrelation(self, self, delta)
 
     def plot(self, **kwargs):
-        plt.imshow(self.r, **kwargs)
+        plt.imshow(self.r, origin='lower', **kwargs)
 
 class TEB:
     def __init__(self, T, E, B):
@@ -204,14 +197,14 @@ class TEB:
     def getTQU(self):
         E_f = self.E.f
         B_f = self.B.f
-        phi_l = np.arctan2(self.ly, self.lx) # tan(angle) = ly/lx
+        phi_l = np.angle(self.lx+1j*self.ly)
         sin2phi = np.sin(2*phi_l)
         cos2phi = np.cos(2*phi_l)
         Q_f = E_f * cos2phi - B_f * sin2phi
         U_f = E_f * sin2phi + B_f * cos2phi
         Q = CMBMap(self.d, self.N, fourier=Q_f)
         U = CMBMap(self.d, self.N, fourier=U_f)
-        return TQU(self.T, Q, U) # deep copy T?
+        return TQU(self.T.copy(), Q, U)
 
 class TQU:
     def __init__(self, T, Q, U):
@@ -232,14 +225,14 @@ class TQU:
     def getTEB(self):
         Q_f = self.Q.f
         U_f = self.U.f
-        phi_l = np.arctan2(self.ly, self.lx)
+        phi_l = np.angle(self.lx+1j*self.ly)
         sin2phi = np.sin(2*phi_l)
         cos2phi = np.cos(2*phi_l)
         E_f = Q_f * cos2phi + U_f * sin2phi
         B_f = - Q_f * sin2phi + U_f * cos2phi
         E = CMBMap(self.d, self.N, fourier=E_f)
         B = CMBMap(self.d, self.N, fourier=B_f)
-        return TEB(self.T, E, B) # deep copy T?
+        return TEB(self.T.copy(), E, B)
 
 class Averager:
     def __init__(self, d, arr, delta):
@@ -257,7 +250,7 @@ class Averager:
         self.ls, self.means, self.stds, self.counts = self.bin()
 
     def bin(self):
-        lx, ly = get_ls(self.d, self.arr.shape[0])
+        lx, ly = get_ls(self.d, self.N)
         ml = modl(lx, ly)
 
         bounds = np.arange(0, np.max(ml), self.delta)
@@ -303,16 +296,13 @@ class CMBSpectra:
 
     def choleskyUnlensed(self, ls):
         '''
-        Compute the Cholesky decomposition (lower-diagonal square root) of covariance matrix for TEp
+        Compute the Cholesky decomposition (lower-diagonal square root) of covariance matrix for TE
         '''
-        covs = np.zeros((ls.size, 3, 3))
+        covs = np.zeros((ls.size, 2, 2))
         covs[:,0,0] = self.TT(ls)
         covs[:,1,0] = self.TE(ls)
-        covs[:,1,1] = self.EE(ls)
-        covs[:,2,0] = self.Tp(ls)
-        covs[:,2,1] = self.Ep(ls)
-        covs[:,2,2] = self.pp(ls) # only lower triangular elements used
-        chol = np.array([np.linalg.cholesky(c) if np.max(np.abs(c)) > 0 else np.zeros((3, 3)) for c in covs])
+        covs[:,1,1] = self.EE(ls) # only lower triangular elements used
+        chol = np.array([np.linalg.cholesky(c) if np.max(np.abs(c)) > 0 else np.zeros((2, 2)) for c in covs])
         return chol
 
     def choleskyLensed(self, ls):
@@ -341,8 +331,11 @@ class CMBSpectra:
         chol = self.choleskyUnlensed(ml_flat)
         samples = sampleCov(chol) * N/d
         T_f = samples[:,0].reshape(ml.shape)
+        T_f[0,0] = 0
         E_f = samples[:,1].reshape(ml.shape)
-        p_f = samples[:,2].reshape(ml.shape)
+        E_f[0,0] = 0
+        p_f = sampleSpec(d, N, self.pp, ml_flat).reshape(ml.shape)
+        p_f[0,0] = 0
         B_f = np.zeros(ml.shape, dtype='complex_')
         T = CMBMap(d, N, fourier=T_f)
         E = CMBMap(d, N, fourier=E_f)
@@ -413,13 +406,19 @@ class Detector:
         teb_obs = self.beamDeconvolve(tqu_obs.getTEB())
         return teb_obs
 
+    def addNoiseAlt(self, teb):
+        '''
+        Directly add noise in Fourier space
+        '''
+        pass
+
 def grad(p):
     '''
     Calculate gradient field of CMBMap.
     Return two CMBMap's.
 
     p : CMBMap
-        Lensing potential
+        Could be lensing potential
     '''
     lx, ly = p.get_ls()
     delx = CMBMap(p.d, p.N, fourier=p.f * 1j*lx)
@@ -440,16 +439,25 @@ def lensInterp(cmbmap, p):
     return CMBMap(d, N, real=new_map)
 
 def lensTaylor(cmbmap, p):
+    '''
+    Naive 3rd order Taylor expansion. Bad convergence.
+    '''
     d = cmbmap.d
     N = cmbmap.N
-    del1x, del1y = grad(cmbmap)
-    del2xx, del2xy = grad(del1x)
-    del2yx, del2yy = grad(del1y)
-    deflx, defly = grad(p)
+    px, py = grad(p)
+    mx, my = grad(cmbmap)
+    mxx, mxy = grad(mx)
+    _, myy = grad(my)
+    mxxx, mxxy = grad(mxx)
+    _, mxyy = grad(mxy)
+    _, myyy = grad(myy)
+
     order0 = cmbmap.r
-    order1 = del1x.r*deflx.r + del1y.r*defly.r
-    order2 = 0.5 * (del2xx.r*deflx.r*deflx.r + del2xy.r*deflx.r*defly.r + del2yx.r*defly.r*deflx.r + del2yy.r*defly.r*defly.r)
-    return CMBMap(d, N, real=order0+order1+order2)
+    order1 = mx.r*px.r + my.r*py.r
+    order2 = 0.5*(mxx.r*px.r*px.r + 2*mxy.r*px.r*py.r + myy.r*py.r*py.r)
+    order3 = 1/6*(mxxx.r*px.r**3 + 3*mxxy.r*px.r**2*py.r + 3*mxyy.r*px.r*py.r**2 + myyy.r*py.r**3)
+
+    return CMBMap(d, N, real=order0+order1+order2+order3)
 
 def lensNearest(cmbmap, p):
     '''
@@ -471,19 +479,19 @@ def lensNearest(cmbmap, p):
     indx, indy = np.meshgrid(inds, inds)
     lensedx = indx + deflx.r / d # pixel units
     lensedy = indy + defly.r / d
-    nearest_prex = np.rint(lensedx).astype(int)
-    nearest_prey = np.rint(lensedy).astype(int)
+    nearest_prex = np.rint(lensedx)
+    nearest_prey = np.rint(lensedy)
     deltax = (lensedx - nearest_prex) * d # back to radians
     deltay = (lensedy - nearest_prey) * d
-    nearestx = nearest_prex % N # periodic boundary condition
-    nearesty = nearest_prey % N
+    nearestx = (nearest_prex % N).astype(int) # periodic boundary condition
+    nearesty = (nearest_prey % N).astype(int)
 
     lensed_map_real = np.zeros((N, N))
     for i, j in np.ndindex(N, N):
         ind = (nearesty[i,j], nearestx[i,j])
         order0 = cmbmap.r[ind]
-        dx = deltax[ind]
-        dy = deltay[ind]
+        dx = deltax[i,j]
+        dy = deltay[i,j]
         order1 = del1x.r[ind]*dx + del1y.r[ind]*dy
         order2 = 0.5 * (del2xx.r[ind]*dx*dx + del2xy.r[ind]*dx*dy + del2yx.r[ind]*dy*dx + del2yy.r[ind]*dy*dy)
         lensed_map_real[i,j] = order0 + order1 + order2
