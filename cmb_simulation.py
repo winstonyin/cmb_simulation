@@ -1,3 +1,4 @@
+from binascii import a2b_base64
 import numpy as np
 from scipy.interpolate import interp1d, RectBivariateSpline
 import matplotlib.pyplot as plt
@@ -203,7 +204,7 @@ class TEB:
     def getTQU(self):
         E_f = self.E.f
         B_f = self.B.f
-        phi_l = np.angle(self.lx+1j*self.ly)
+        phi_l = np.arctan2(self.ly, self.lx)
         sin2phi = np.sin(2*phi_l)
         cos2phi = np.cos(2*phi_l)
         Q_f = E_f * cos2phi - B_f * sin2phi
@@ -231,7 +232,7 @@ class TQU:
     def getTEB(self):
         Q_f = self.Q.f
         U_f = self.U.f
-        phi_l = np.angle(self.lx+1j*self.ly)
+        phi_l = np.arctan2(self.ly, self.lx)
         sin2phi = np.sin(2*phi_l)
         cos2phi = np.cos(2*phi_l)
         E_f = Q_f * cos2phi + U_f * sin2phi
@@ -272,12 +273,16 @@ class Averager:
         counts = counts[sub]
         return ls, means, stds, counts
 
-    def plot(self, scale=lambda l: 1, errorbars=True, **kwargs):
+    def plot(self, scale=lambda l: 1, errorbars=True, logaxis=None, **kwargs):
         scales = scale(self.ls)
         if errorbars:
             plt.errorbar(self.ls, self.means * scales, self.stds * scales / np.sqrt(self.counts), **kwargs)
         else:
             plt.plot(self.ls, self.means * scales, **kwargs)
+        if logaxis == 'x' or logaxis == 'both':
+            plt.xscale('log')
+        if logaxis == 'y' or logaxis == 'both':
+            plt.yscale('log')
 
 class CMBSpectra:
     '''
@@ -519,6 +524,162 @@ def lensTEB(teb, p, fun=lensTaylor):
     teb_len = TQU(T_len, Q_len, U_len).getTEB()
     return teb_len
 
-class Estimator:
-    def __init__(self):
-        pass
+def elemTensorProd(A, B):
+    '''
+    Given A: (m, n, ...) and B: (m, n, ...), multiply A and B in the first two dimensions and preserve all the remaining indices.
+    For example, (10, 10, 2, 3) and (10, 10, 5, 6) become (10, 10, 2, 3, 5, 6).
+    '''
+    inds1 = np.arange(A.ndim)
+    inds2 = np.concatenate((np.arange(2), np.arange(A.ndim, A.ndim+B.ndim-2)))
+    out = np.concatenate((inds1, inds2[2:]))
+    return np.einsum(A, inds1, B, inds2, out)
+
+def expandProd(*factors):
+    '''
+    Returns a list of 2-tuples that is the foiled-out product of several sums
+    Each factor is [(f(l1), g(l2)), ...]
+    Each f(l1) or g(l2) is a Fourier map
+    '''
+    expansion = []
+    shape = tuple([len(terms) for terms in factors])
+    for inds in np.ndindex(shape):
+        new_term1 = factors[0][inds[0]][0].copy()
+        new_term2 = factors[0][inds[0]][1].copy()
+        for n in range(1, len(inds)):
+            new_term1 = elemTensorProd(new_term1, factors[n][inds[n]][0])
+            new_term2 = elemTensorProd(new_term2, factors[n][inds[n]][1])
+        expansion.append((new_term1, new_term2))
+    return expansion
+
+def dotVec(arr, vec):
+    '''
+    Element-wise dot all remaining dimensions of arr with that of vec
+
+    arr : (m, n, k, ..., k)
+    vec : (m, n, k)
+    '''
+    ret = arr.copy()
+    for _ in range(arr.ndim-2):
+        ret = np.einsum('ijk...,ijk->ij...', ret, vec)
+    return ret
+
+def irfft2(arr):
+    '''
+    This is for some reason up to 2x faster than np.fft.irfft2(..., axes=(0,1)).
+    (np.fft.rfft2 is faster though...)
+    '''
+    N = arr.shape[0]
+    ret_shape = [N, N] + list(arr.shape[2:])
+    ret = np.zeros(ret_shape)
+    for ind in np.ndindex(arr.shape[2:]):
+        slice = tuple([Ellipsis] + list(ind))
+        ret[slice] = np.fft.irfft2(arr[slice], s=(N, N))
+    return ret
+
+def convolveTerm(term):
+    '''
+    term : 2-tuple of (N, N//2+1, ...) arrays
+    '''
+    fac1_f = term[0]
+    fac2_f = term[1]
+    fac1_r = irfft2(fac1_f)
+    fac2_r = irfft2(fac2_f)
+    prod_r = elemTensorProd(fac1_r, fac2_r)
+    prod_f = np.fft.rfft2(prod_r, axes=(0, 1))
+    return prod_f
+
+def convolveFull(terms, ls):
+    '''
+    FFT convolve all terms, dotting remaining indices with ls (L)
+
+    terms : list of 2-tuples of (N, N//2+1, ...) arrays
+    ls : (N, N//2+1, 2) array
+    '''
+    return sum([dotVec(convolveTerm(t), ls) for t in terms])
+
+class lensingEstimator:
+    '''
+    Class that evaluates estimator integrands on the given maps, before plugging them into IndividualEstimator
+    '''
+    def __init__(self, specs, teb, detector):
+        '''
+        specs : CMBSpectra
+            Power spectra to be used in QEs will be extracted from here
+        teb : TEB
+        '''
+        self.specs = specs
+        self.teb = teb
+        self.detector = detector
+        self.lx = teb.lx
+        self.ly = teb.ly
+        self.ls = np.stack((self.lx, self.ly), -1)
+        self.ml = teb.ml
+        # pre-evaluate spectrum at Fourier space points
+        self.TT = specs.TT(self.ml)
+        self.TE = specs.TE(self.ml)
+        self.EE = specs.EE(self.ml)
+        self.BB = specs.BB(self.ml)
+        self.TT_t = self.TT + detector.TTn(self.ml)
+        self.EE_t = self.EE + detector.EEn(self.ml)
+        self.BB_t = self.BB + detector.BBn(self.ml)
+        self.TT_t[0,0] = 1e-10 # to prevent /0
+        self.EE_t[0,0] = 1e-10
+        self.BB_t[0,0] = 1e-10
+        self.ones = np.ones(teb.T.f.shape)
+
+    def sin2phi12(self):
+        phi = np.arctan2(self.ly, self.lx)
+        sin2phi = np.sin(2*phi)
+        cos2phi = np.cos(2*phi)
+        terms = [
+            (sin2phi, cos2phi),
+            (-cos2phi, sin2phi)
+            ]
+        return terms
+
+    def cos2phi12(self):
+        phi = np.arctan2(self.ly, self.lx)
+        sin2phi = np.sin(2*phi)
+        cos2phi = np.cos(2*phi)
+        terms = [
+            (cos2phi, cos2phi),
+            (sin2phi, sin2phi)
+            ]
+        return terms
+
+    def f_EB(self):
+        f1 = [(elemTensorProd(self.EE, self.ls), self.ones)] # remaining index will be dotted with ls (L) after convolution
+        f2 = self.sin2phi12()
+        return expandProd(f2, f1) # leave dangling index to the end
+
+    def qe(self, XY):
+        '''
+        Quadratic estimator integrand, before dotting with L and normalisation
+        '''
+        f_str = 'f_' + XY
+        C_XX_t_str = XY[0] + XY[0] + '_t'
+        C_YY_t_str = XY[1] + XY[1] + '_t'
+        X = self.teb.__getattribute__(XY[0]).f
+        Y = self.teb.__getattribute__(XY[1]).f
+        prod = [(X, Y)]
+        f = self.__getattribute__(f_str)()
+        C_XX_t = self.__getattribute__(C_XX_t_str)
+        C_YY_t = self.__getattribute__(C_YY_t_str)
+        c = 2 if XY[0] == XY[1] else 1
+        denom = [(1/C_XX_t/c, 1/C_YY_t)]
+        return expandProd(prod, denom, f)
+
+    def norm(self, XY):
+        '''
+        Normalisation integrand, before dotting with L
+        '''
+        f_str = 'f_' + XY
+        C_XX_t_str = XY[0] + XY[0] + '_t'
+        C_YY_t_str = XY[1] + XY[1] + '_t'
+        f = self.__getattribute__(f_str)()
+        C_XX_t = self.__getattribute__(C_XX_t_str)
+        C_YY_t = self.__getattribute__(C_YY_t_str)
+        c = 2 if XY[0] == XY[1] else 1
+        c *= self.teb.d**4 # convert to discrete Fourier before FFT
+        denom = [(1/C_XX_t/c, 1/C_YY_t)]
+        return expandProd(denom, f, f)
