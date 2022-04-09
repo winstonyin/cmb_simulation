@@ -7,6 +7,9 @@ import camb
 def scale2(l):
     return l*(l+1)/(2*np.pi)
 
+def scale2deg(l):
+    return l*(l+1)/(2*np.pi)*(180/np.pi)**2
+
 def scale4(l):
     return l**4/(2*np.pi)
 
@@ -340,7 +343,7 @@ class CMBSpectra:
         ml = modl(lx, ly)
         ml_flat = ml.reshape(-1)
         chol = self.choleskyUnlensed(ml_flat)
-        samples = sampleCov(chol) * N/d
+        samples = sampleCov(chol) * N/d # factor needed for discrete FFT normalisation
         T_f = samples[:,0].reshape(ml.shape)
         T_f[0,0] = 0
         E_f = samples[:,1].reshape(ml.shape)
@@ -576,12 +579,12 @@ def irfft2(arr):
         ret[slice] = np.fft.irfft2(arr[slice], s=(N, N))
     return ret
 
+### implement padding here
 def convolveTerm(term):
     '''
     term : 2-tuple of (N, N//2+1, ...) arrays
     '''
-    fac1_f = term[0]
-    fac2_f = term[1]
+    fac1_f, fac2_f = term
     fac1_r = irfft2(fac1_f)
     fac2_r = irfft2(fac2_f)
     prod_r = elemTensorProd(fac1_r, fac2_r)
@@ -597,9 +600,10 @@ def convolveFull(terms, ls):
     '''
     return sum([dotVec(convolveTerm(t), ls) for t in terms])
 
-class lensingEstimator:
+class Estimator:
     '''
-    Class that evaluates estimator integrands on the given maps, before plugging them into IndividualEstimator
+    Some of these methods should be overridden.
+    Must implement at least one of f_XY for .qe('XY') or norm('XY') to work.
     '''
     def __init__(self, specs, teb, detector):
         '''
@@ -614,17 +618,6 @@ class lensingEstimator:
         self.ly = teb.ly
         self.ls = np.stack((self.lx, self.ly), -1)
         self.ml = teb.ml
-        # pre-evaluate spectrum at Fourier space points
-        self.TT = specs.TT(self.ml)
-        self.TE = specs.TE(self.ml)
-        self.EE = specs.EE(self.ml)
-        self.BB = specs.BB(self.ml)
-        self.TT_t = self.TT + detector.TTn(self.ml)
-        self.EE_t = self.EE + detector.EEn(self.ml)
-        self.BB_t = self.BB + detector.BBn(self.ml)
-        self.TT_t[0,0] = 1e-10 # to prevent /0
-        self.EE_t[0,0] = 1e-10
-        self.BB_t[0,0] = 1e-10
         self.ones = np.ones(teb.T.f.shape)
 
     def sin2phi12(self):
@@ -646,11 +639,6 @@ class lensingEstimator:
             (sin2phi, sin2phi)
             ]
         return terms
-
-    def f_EB(self):
-        f1 = [(elemTensorProd(self.EE, self.ls), self.ones)] # remaining index will be dotted with ls (L) after convolution
-        f2 = self.sin2phi12()
-        return expandProd(f2, f1) # leave dangling index to the end
 
     def qe(self, XY):
         '''
@@ -680,6 +668,79 @@ class lensingEstimator:
         C_XX_t = self.__getattribute__(C_XX_t_str)
         C_YY_t = self.__getattribute__(C_YY_t_str)
         c = 2 if XY[0] == XY[1] else 1
-        c *= self.teb.d**4 # convert to discrete Fourier before FFT
-        denom = [(1/C_XX_t/c, 1/C_YY_t)]
+        d = self.teb.d
+        denom = [(1/C_XX_t/c/d**2, 1/C_YY_t/d**2)] # convert to discrete Fourier before FFT
         return expandProd(denom, f, f)
+
+class LensingEstimator(Estimator):
+    '''
+    Class that evaluates estimator integrands on the given maps, before plugging them into IndividualEstimator
+    '''
+    def __init__(self, specs, teb, detector, lensed=True):
+        super().__init__(specs, teb, detector)
+        # pre-evaluate spectrum at Fourier space points
+        if lensed:
+            self.TT = specs.TT_len(self.ml)
+            self.TE = specs.TE_len(self.ml)
+            self.EE = specs.EE_len(self.ml)
+            self.BB = specs.BB_len(self.ml)
+        else:
+            self.TT = specs.TT(self.ml)
+            self.TE = specs.TE(self.ml)
+            self.EE = specs.EE(self.ml)
+            self.BB = specs.BB(self.ml)
+        self.TT_t = self.TT + detector.TTn(self.ml)
+        self.EE_t = self.EE + detector.EEn(self.ml)
+        self.BB_t = self.BB + detector.BBn(self.ml)
+
+    def f_TT(self):
+        f = [
+            (elemTensorProd(self.TT, self.ls), self.ones),
+            (self.ones, elemTensorProd(self.TT, self.ls))
+            ]
+        return f
+
+    def f_EE(self):
+        f1 = [
+            (elemTensorProd(self.EE, self.ls), self.ones),
+            (self.ones, elemTensorProd(self.EE, self.ls))
+            ]
+        f2 = self.cos2phi12()
+        return expandProd(f2, f1)
+
+    def f_EB(self):
+        f1 = [
+            (elemTensorProd(self.EE, self.ls), self.ones),
+            (-self.ones, elemTensorProd(self.BB, self.ls))
+            ] # remaining index will be dotted with ls (L) after convolution
+        f2 = self.sin2phi12()
+        return expandProd(f2, f1) # leave dangling index to the end
+
+class RotationEstimator(Estimator):
+    '''
+    Class that evaluates estimator integrands on the given maps, before plugging them into IndividualEstimator
+    '''
+    def __init__(self, specs, teb, detector, lensed=True):
+        super().__init__(specs, teb, detector)
+        # pre-evaluate spectrum at Fourier space points
+        if lensed:
+            self.TT = specs.TT_len(self.ml)
+            self.TE = specs.TE_len(self.ml)
+            self.EE = specs.EE_len(self.ml)
+            self.BB = specs.BB_len(self.ml)
+        else:
+            self.TT = specs.TT(self.ml)
+            self.TE = specs.TE(self.ml)
+            self.EE = specs.EE(self.ml)
+            self.BB = specs.BB(self.ml)
+        self.TT_t = self.TT + detector.TTn(self.ml)
+        self.EE_t = self.EE + detector.EEn(self.ml)
+        self.BB_t = self.BB + detector.BBn(self.ml)
+
+    def f_EB(self):
+        f1 = [
+            (2*self.EE, self.ones),
+            (-2*self.ones, self.BB)
+            ]
+        f2 = self.cos2phi12()
+        return expandProd(f2, f1) # leave dangling index to the end
