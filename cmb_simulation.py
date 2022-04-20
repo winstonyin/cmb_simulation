@@ -3,6 +3,7 @@ import numpy as np
 from scipy.interpolate import interp1d, RectBivariateSpline
 import matplotlib.pyplot as plt
 import camb
+import warnings
 
 def scale2(l):
     return l*(l+1)/(2*np.pi)
@@ -31,7 +32,7 @@ def getCambSpectra(lmax=7000):
     powers = results.get_cmb_power_spectra(pars, CMB_unit='muK', raw_cl=True) # raw_cl so that no factors of ell are multiplied to C_ell
     return powers
 
-def get_ls(d, N):
+def get_ls(d, N, complex=False):
     '''
     Return real FFT lx, ly coords.
     Convention: first index is y (vertical), second index is x (horizontal)
@@ -41,8 +42,8 @@ def get_ls(d, N):
     N : int
         Number of pixels per side
     '''
-    x_freqs = np.fft.rfftfreq(N, d) * 2*np.pi
     y_freqs = np.fft.fftfreq(N, d) * 2*np.pi
+    x_freqs = y_freqs if complex else np.fft.rfftfreq(N, d) * 2*np.pi
     return np.meshgrid(x_freqs, y_freqs)
 
 def modl(lx, ly):
@@ -81,12 +82,12 @@ def sampleSpec(d, N, spec, ml=None):
     ret_flat = sampleCov(chol) * N/d
     return ret_flat.reshape(ml.shape)
 
-def binnedCorrelation(X, Y, delta=20):
+def binnedCorrelation(X, Y, delta=20, lmin=None, lmax=None):
     '''
     X, Y : CMBMap
     '''
     prod = (X.f * Y.f.conj()).real * (X.d/X.N)**2
-    return Averager(X.d, prod, delta)
+    return Averager(X.d, prod, delta, lmin, lmax)
 
 def plot2Maps(real_map1, real_map2, title1='', title2=''):
     fig, ax = plt.subplots(1, 2, figsize=(16,8))
@@ -134,14 +135,15 @@ class Spectrum:
     def plot(self, ls, scale=lambda l: 1, logaxis=None, **kwargs):
         Cls = self.spec(ls)
         scale_arr = np.vectorize(scale)(ls)
+        fmt = kwargs.pop('fmt') if 'fmt' in kwargs else ''
         if logaxis is None:
-            plt.plot(ls, Cls * scale_arr, **kwargs)
+            plt.plot(ls, Cls * scale_arr, fmt, **kwargs)
         elif logaxis == 'x':
-            plt.semilogx(ls, Cls * scale_arr, **kwargs)
+            plt.semilogx(ls, Cls * scale_arr, fmt, **kwargs)
         elif logaxis == 'y':
-            plt.semilogy(ls, Cls * scale_arr, **kwargs)
+            plt.semilogy(ls, Cls * scale_arr, fmt, **kwargs)
         elif logaxis == 'both':
-            plt.loglog(ls, Cls * scale_arr, **kwargs)
+            plt.loglog(ls, Cls * scale_arr, fmt, **kwargs)
 
 class InterpSpectrum(Spectrum):
     '''
@@ -182,8 +184,8 @@ class CMBMap:
     def get_ls(self):
         return get_ls(self.d, self.N)
 
-    def binSpectrum(self, delta=20):
-        return binnedCorrelation(self, self, delta)
+    def binSpectrum(self, delta=20, lmin=None, lmax=None):
+        return binnedCorrelation(self, self, delta, lmin, lmax)
 
     def plot(self, **kwargs):
         plt.imshow(self.r, origin='lower', **kwargs)
@@ -245,7 +247,7 @@ class TQU:
         return TEB(self.T.copy(), E, B)
 
 class Averager:
-    def __init__(self, d, arr, delta):
+    def __init__(self, d, arr, delta, lmin=None, lmax=None):
         '''
         arr : (N, N//2+1) real array
         d : float
@@ -257,16 +259,20 @@ class Averager:
         self.arr = arr
         self.N = arr.shape[0]
         self.delta = delta
-        self.ls, self.means, self.stds, self.counts = self.bin()
+        self.ls, self.means, self.stds, self.counts = self.bin(lmin=lmin, lmax=lmax)
 
-    def bin(self):
+    def bin(self, lmin=None, lmax=None):
         lx, ly = get_ls(self.d, self.N)
         ml = modl(lx, ly)
+        lmin = 0 if lmin is None else lmin
+        lmax = np.max(ml) if lmax is None else lmax
 
-        bounds = np.arange(0, np.max(ml), self.delta)
+        bounds = np.arange(lmin, lmax, self.delta)
         binned = [self.arr[(ml>=b) * (ml<b+self.delta)] for b in bounds]
-        means = np.array([np.mean(b) for b in binned])
-        stds = np.array([np.std(b) for b in binned])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            means = np.array([np.mean(b) for b in binned])
+            stds = np.array([np.std(b) for b in binned])
         counts = np.array([b.size for b in binned])
         sub = (counts > 0) # remove empty bins
 
@@ -281,7 +287,9 @@ class Averager:
         if errorbars:
             plt.errorbar(self.ls, self.means * scales, self.stds * scales / np.sqrt(self.counts), **kwargs)
         else:
-            plt.plot(self.ls, self.means * scales, **kwargs)
+            if 'fmt' in kwargs.keys():
+                fmt = kwargs.pop('fmt')
+            plt.plot(self.ls, self.means * scales, fmt, **kwargs)
         if logaxis == 'x' or logaxis == 'both':
             plt.xscale('log')
         if logaxis == 'y' or logaxis == 'both':
@@ -585,18 +593,18 @@ def convolveTerm(term):
     term : 2-tuple of (N, N//2+1, ...) arrays
     '''
     fac1_f, fac2_f = term
-    fac1_r = irfft2(fac1_f)
-    fac2_r = irfft2(fac2_f)
+    fac1_r = np.fft.ifft2(fac1_f, axes=(0, 1))
+    fac2_r = np.fft.ifft2(fac2_f, axes=(0, 1))
     prod_r = elemTensorProd(fac1_r, fac2_r)
-    prod_f = np.fft.rfft2(prod_r, axes=(0, 1))
+    prod_f = np.fft.fft2(prod_r, axes=(0, 1))
     return prod_f
 
 def convolveFull(terms, ls):
     '''
     FFT convolve all terms, dotting remaining indices with ls (L)
 
-    terms : list of 2-tuples of (N, N//2+1, ...) arrays
-    ls : (N, N//2+1, 2) array
+    terms : list of 2-tuples of (N, N, ...) arrays
+    ls : (N, N, 2) array
     '''
     return sum([dotVec(convolveTerm(t), ls) for t in terms])
 
@@ -614,11 +622,14 @@ class Estimator:
         self.specs = specs
         self.teb = teb
         self.detector = detector
-        self.lx = teb.lx
-        self.ly = teb.ly
+        self.d = teb.d
+        self.N = teb.N
+        self.lx, self.ly = get_ls(self.d, self.N, complex=True)
         self.ls = np.stack((self.lx, self.ly), -1)
-        self.ml = teb.ml
-        self.ones = np.ones(teb.T.f.shape)
+        self.ml = modl(self.lx, self.ly)
+        self.ones = np.ones((self.N, self.N))
+        self.unnorm_qe = dict() # keys: XY
+        self.noise = dict()
 
     def sin2phi12(self):
         phi = np.arctan2(self.ly, self.lx)
@@ -640,27 +651,36 @@ class Estimator:
             ]
         return terms
 
-    def qe(self, XY):
+    def unnormQETerms(self, XY, lmin, lmax):
         '''
-        Quadratic estimator integrand, before dotting with L and normalisation
+        Quadratic estimator integrand terms, before dotting with L and normalisation.
+        Return a list of 2-tuples of complex FFT maps.
+        f / (C_TT_tot_l1 * C_TT_tot_l2) / (2 if X==Y else 1), with masking in l space
         '''
+        lmask_factor = (self.ml >= lmin) * (self.ml <= lmax)
+        lmask = [(lmask_factor, lmask_factor)]
         f_str = 'f_' + XY
         C_XX_t_str = XY[0] + XY[0] + '_t'
         C_YY_t_str = XY[1] + XY[1] + '_t'
-        X = self.teb.__getattribute__(XY[0]).f
-        Y = self.teb.__getattribute__(XY[1]).f
+        X_r = self.teb.__getattribute__(XY[0]).r
+        Y_r = self.teb.__getattribute__(XY[1]).r
+        X = np.fft.fft2(X_r) # convert to complex FFT
+        Y = np.fft.fft2(Y_r)
         prod = [(X, Y)]
         f = self.__getattribute__(f_str)()
         C_XX_t = self.__getattribute__(C_XX_t_str)
         C_YY_t = self.__getattribute__(C_YY_t_str)
         c = 2 if XY[0] == XY[1] else 1
         denom = [(1/C_XX_t/c, 1/C_YY_t)]
-        return expandProd(prod, denom, f)
+        return expandProd(lmask, prod, denom, f)
 
-    def norm(self, XY):
+    def normTerms(self, XY, lmin, lmax):
         '''
-        Normalisation integrand, before dotting with L
+        Normalisation integrand terms, before dotting with L.
+        Return a list of 2-tuples of complex FFT maps.
         '''
+        lmask_factor = (self.ml >= lmin) * (self.ml <= lmax)
+        lmask = [(lmask_factor, lmask_factor)]
         f_str = 'f_' + XY
         C_XX_t_str = XY[0] + XY[0] + '_t'
         C_YY_t_str = XY[1] + XY[1] + '_t'
@@ -670,7 +690,28 @@ class Estimator:
         c = 2 if XY[0] == XY[1] else 1
         d = self.teb.d
         denom = [(1/C_XX_t/c/d**2, 1/C_YY_t/d**2)] # convert to discrete Fourier before FFT
-        return expandProd(denom, f, f)
+        return expandProd(lmask, denom, f, f)
+
+    def evaluateQE(self, XY, lmin, lmax):
+        '''
+        Evaluate the XY lensing estimator as a CMBMap.
+        '''
+        unnorm_qe_terms = self.unnormQETerms(XY, lmin, lmax)
+        norm_terms = self.normTerms(XY, lmin, lmax)
+        unnorm_qe = convolveFull(unnorm_qe_terms, self.ls)[:,:self.N//2+1]
+        self.unnorm_qe[XY] = unnorm_qe
+        norm = convolveFull(norm_terms, self.ls).real[:,:self.N//2+1] * self.d**2 # convert from discrete Fourier to continuous
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            noise = np.nan_to_num(1/norm, posinf=0) # fix /0
+            self.noise[XY] = noise
+            norm_qe = unnorm_qe * noise
+            norm_qe_r = np.fft.irfft2(norm_qe).real
+        return CMBMap(self.d, self.N, real=norm_qe_r)
+
+    def plotNoise(self, XY, lmin, lmax, delta=20, **kwargs):
+        avg = Averager(self.d, self.noise[XY], delta, lmin, lmax)
+        avg.plot(**kwargs)
 
 class LensingEstimator(Estimator):
     '''
@@ -711,7 +752,7 @@ class LensingEstimator(Estimator):
     def f_EB(self):
         f1 = [
             (elemTensorProd(self.EE, self.ls), self.ones),
-            (-self.ones, elemTensorProd(self.BB, self.ls))
+            (self.ones, -elemTensorProd(self.BB, self.ls))
             ] # remaining index will be dotted with ls (L) after convolution
         f2 = self.sin2phi12()
         return expandProd(f2, f1) # leave dangling index to the end
