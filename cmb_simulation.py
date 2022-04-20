@@ -738,14 +738,29 @@ class LensingEstimator(Estimator):
         f = [
             (elemTensorProd(self.TT, self.ls), self.ones),
             (self.ones, elemTensorProd(self.TT, self.ls))
-            ]
+        ]
+        return f
+
+    def f_TE(self):
+        # approximation of a non-separable integral
+        f = expandProd(
+            [(elemTensorProd(self.TE, self.ls), self.ones)],
+            self.cos2phi12()
+        ) + [(self.ones, elemTensorProd(self.TE, self.ls))]
+        return f
+
+    def f_TB(self):
+        f = expandProd(
+            [(elemTensorProd(self.TE, self.ls), self.ones)],
+            self.sin2phi12()
+        )
         return f
 
     def f_EE(self):
         f1 = [
             (elemTensorProd(self.EE, self.ls), self.ones),
             (self.ones, elemTensorProd(self.EE, self.ls))
-            ]
+        ]
         f2 = self.cos2phi12()
         return expandProd(f2, f1)
 
@@ -753,9 +768,17 @@ class LensingEstimator(Estimator):
         f1 = [
             (elemTensorProd(self.EE, self.ls), self.ones),
             (self.ones, -elemTensorProd(self.BB, self.ls))
-            ] # remaining index will be dotted with ls (L) after convolution
+        ] # remaining index will be dotted with ls (L) after convolution
         f2 = self.sin2phi12()
-        return expandProd(f2, f1) # leave dangling index to the end
+        return expandProd(f2, f1)
+
+    def f_BB(self):
+        f1 = [
+            (elemTensorProd(self.BB, self.ls), self.ones),
+            (self.ones, elemTensorProd(self.BB, self.ls))
+        ]
+        f2 = self.cos2phi12()
+        return expandProd(f2, f1)
 
 class RotationEstimator(Estimator):
     '''
@@ -778,10 +801,41 @@ class RotationEstimator(Estimator):
         self.EE_t = self.EE + detector.EEn(self.ml)
         self.BB_t = self.BB + detector.BBn(self.ml)
 
+    def f_TE(self):
+        # approximation of a non-separable integral
+        f = expandProd(
+            [(-2*self.TE, self.ones)],
+            self.sin2phi12()
+        )
+        return f
+
+    def f_TB(self):
+        f = expandProd(
+            [(2*self.TE, self.ones)],
+            self.cos2phi12()
+        )
+        return f
+
+    def f_EE(self):
+        f1 = [
+            (-2*self.EE, self.ones),
+            (2*self.ones, self.EE)
+        ]
+        f2 = self.sin2phi12()
+        return expandProd(f2, f1)
+
     def f_EB(self):
         f1 = [
             (2*self.EE, self.ones),
             (-2*self.ones, self.BB)
-            ]
+        ]
         f2 = self.cos2phi12()
-        return expandProd(f2, f1) # leave dangling index to the end
+        return expandProd(f2, f1)
+        
+    def f_BB(self):
+        f1 = [
+            (-2*self.BB, self.ones),
+            (2*self.ones, self.BB)
+        ]
+        f2 = self.sin2phi12()
+        return expandProd(f2, f1)
