@@ -132,6 +132,17 @@ class Spectrum:
         ret = (samples[:,0] + 1j*samples[:,1]) * np.sqrt(Cls/2) # /2 for real and imag parts
         return ret
 
+    def generateMap(self, d, N):
+        '''
+        Return a CMBMap for lensing potential uncorrelated with the unlensed TEB
+        '''
+        lx, ly = get_ls(d, N)
+        ml = modl(lx, ly)    
+        ml_flat = ml.reshape(-1)
+        p_f = sampleSpec(d, N, self, ml_flat).reshape(ml.shape)
+        p_f[0,0] = 0
+        return CMBMap(d, N, fourier=p_f)
+
     def plot(self, ls, scale=lambda l: 1, logaxis=None, **kwargs):
         Cls = self.spec(ls)
         scale_arr = np.vectorize(scale)(ls)
@@ -180,6 +191,11 @@ class CMBMap:
     def setReal(self, real):
         self.r = real
         self.f = np.fft.rfft2(real)
+
+    def masked(self, lmin, lmax):
+        ml = modl(*self.get_ls())
+        lmask = (ml >= lmin) * (ml <= lmax)
+        return CMBMap(self.d, self.N, fourier=self.f*lmask)
 
     def get_ls(self):
         return get_ls(self.d, self.N)
@@ -366,12 +382,7 @@ class CMBSpectra:
         '''
         Return a CMBMap for lensing potential uncorrelated with the unlensed TEB
         '''
-        lx, ly = get_ls(d, N)
-        ml = modl(lx, ly)    
-        ml_flat = ml.reshape(-1)
-        p_f = sampleSpec(d, N, self.pp, ml_flat).reshape(ml.shape)
-        p_f[0,0] = 0
-        return CMBMap(d, N, fourier=p_f)
+        return self.pp.generateMap(d, N)
 
 planck_params = (45, 45*np.sqrt(2), 5)
 simons_params = (7, 7*np.sqrt(2), 1.4)
@@ -528,12 +539,29 @@ def lensTaylorNearest(cmbmap, p):
     return CMBMap(d, N, real=lensed_map_real)
 
 def lensTEB(teb, p, fun=lensTaylor):
+    '''
+    teb : TEB
+    p : CMBMap
+        Lensing potential
+    '''
     tqu = teb.getTQU()
     T_len = fun(tqu.T, p)
     Q_len = fun(tqu.Q, p)
     U_len = fun(tqu.U, p)
     teb_len = TQU(T_len, Q_len, U_len).getTEB()
     return teb_len
+
+def rotateTEB(teb, a):
+    tqu = teb.getTQU()
+    sin2a = np.sin(2*a.r) # per real space pixel
+    cos2a = np.cos(2*a.r)
+    Q_r = tqu.Q.r
+    U_r = tqu.U.r
+    Q_rot_r = Q_r * cos2a - U_r * sin2a
+    U_rot_r = Q_r * sin2a + U_r * cos2a
+    Q_rot = CMBMap(teb.d, teb.N, real=Q_rot_r)
+    U_rot = CMBMap(teb.d, teb.N, real=U_rot_r)
+    return TQU(tqu.T, Q_rot, U_rot).getTEB()
 
 def elemTensorProd(A, B):
     '''
