@@ -32,6 +32,40 @@ def getCambSpectra(lmax=7000):
     powers = results.get_cmb_power_spectra(pars, CMB_unit='muK', raw_cl=True) # raw_cl so that no factors of ell are multiplied to C_ell
     return powers
 
+def getCaa():
+    '''
+    For Model II (logarithmically distributed string radii),
+    return the theoretical alpha-alpha spectrum
+    '''
+    dat_arr = np.load('dat/C_aa_model2.npy')
+    ls_arr = dat_arr[:,0]
+    C_aa_term1_arr = dat_arr[:,1]
+    C_aa_term2_arr = dat_arr[:,2]
+    C_aa_term1 = interp1d(ls_arr, C_aa_term1_arr, kind='cubic', bounds_error=False, fill_value=0)
+    C_aa_term2 = interp1d(ls_arr, C_aa_term2_arr, kind='cubic', bounds_error=False, fill_value=0)
+    def C_aa(f_sub):
+        def F(l):
+            return (1-f_sub)*C_aa_term1(l) + f_sub*C_aa_term2(l)
+        return F
+    return C_aa
+
+def rotationFromSingleCircularString(N, A, r, shift, parity):
+    a_em = 1/137.036 # fine structure constant
+    rot_angle = A*a_em
+    xs, ys = np.meshgrid(range(N), range(N))
+    x0, y0 = shift
+    inside = (xs-x0)**2 + (ys-y0)**2 < r**2
+    a = rot_angle * inside * parity
+    return a
+
+def rotationFromCircularStrings(N, A, r, n):
+    shifts = np.random.random((n, 2)) * (N + 2*r) - r # random circle centres
+    parities = np.random.randint(0, 2, n) * 2 - 1 # random +-1
+    a = np.zeros((N, N))
+    for i in range(n):
+        a += rotationFromSingleCircularString(N, A, r, shifts[i], parities[i])
+    return a
+
 def get_ls(d, N, complex=False):
     '''
     Return real FFT lx, ly coords.
