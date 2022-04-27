@@ -545,30 +545,28 @@ def lensTaylorNearest(cmbmap, p):
     '''
     d = cmbmap.d
     N = cmbmap.N
-    del1x, del1y = grad(cmbmap)
-    del2xx, del2xy = grad(del1x)
-    del2yx, del2yy = grad(del1y)
+    ls = np.stack(cmbmap.get_ls(), -1)
+    del1_f = elemTensorProd(cmbmap.f, 1j*ls)
+    del2_f = elemTensorProd(del1_f, 1j*ls)
+    del1_r = irfft2(del1_f)
+    del2_r = irfft2(del2_f)
 
-    deflx, defly = grad(p) # deflection field in radians
-    inds = np.arange(N)
-    indx, indy = np.meshgrid(inds, inds)
-    lensedx = indx + deflx.r / d # pixel units
-    lensedy = indy + defly.r / d
-    nearest_prex = np.rint(lensedx)
-    nearest_prey = np.rint(lensedy)
-    deltax = (lensedx - nearest_prex) * d # back to radians
-    deltay = (lensedy - nearest_prey) * d
-    nearestx = (nearest_prex % N).astype(int) # periodic boundary condition
-    nearesty = (nearest_prey % N).astype(int)
+    defl_f = elemTensorProd(p.f, 1j*ls) # deflection field in radians
+    defl_r = irfft2(defl_f)
+    ints = np.arange(N)
+    inds = np.stack(np.meshgrid(ints, ints), -1) # :,:,0 = ind_x, :,:,1 = ind_y
+    lensed = inds + defl_r / d # pixel units
+    nearest_pre = np.rint(lensed)
+    delta = (lensed - nearest_pre) * d # back to radians
+    nearest = (nearest_pre % N).astype(int) # periodic boundary condition
 
     lensed_map_real = np.zeros((N, N))
     for i, j in np.ndindex(N, N):
-        ind = (nearesty[i,j], nearestx[i,j])
+        ind = (nearest[i,j,1], nearest[i,j,0])
         order0 = cmbmap.r[ind]
-        dx = deltax[i,j]
-        dy = deltay[i,j]
-        order1 = del1x.r[ind]*dx + del1y.r[ind]*dy
-        order2 = 0.5 * (del2xx.r[ind]*dx*dx + del2xy.r[ind]*dx*dy + del2yx.r[ind]*dy*dx + del2yy.r[ind]*dy*dy)
+        dxy = delta[i,j]
+        order1 = del1_r[ind] @ dxy
+        order2 = 0.5 * del2_r[ind] @ dxy @ dxy
         lensed_map_real[i,j] = order0 + order1 + order2
     return CMBMap(d, N, real=lensed_map_real)
 
