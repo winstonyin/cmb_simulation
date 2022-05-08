@@ -49,6 +49,34 @@ def getCaa():
         return F
     return C_aa
 
+def sampleRoundedSquare(N, r):
+    '''
+    Uniform sampling in rounded square with total side length N+2r and corner radius r.
+    '''
+    area_rect = (N + 4*r) * N # pixel units
+    area_circ = np.pi * r**2
+    ratio = area_rect / (area_rect + area_circ)
+    rectangle = np.random.random() < ratio
+    if rectangle:
+        coord = np.random.random(2) * np.array((N + 4*r, N)) + np.array((-2*r, 0))
+        if coord[0] < -r:
+            coord = coord[::-1] + np.array((0, r))
+        elif coord[0] >= N+r:
+            coord = coord[::-1] + np.array((0, -r))
+    else:
+        R_sq, th = np.random.random(2) * np.array((r**2, 2*np.pi))
+        R = np.sqrt(R_sq)
+        coord = np.array((R * np.cos(th), R * np.sin(th)))
+        if th < np.pi/2:
+            coord += np.array((N, N))
+        elif th < np.pi:
+            coord += np.array((0, N))
+        elif th < 3*np.pi/2:
+            pass
+        else:
+            coord += np.array((N, 0))
+    return coord
+
 def rotationFromSingleCircularString(N, A, r, shift, parity):
     a_em = 1/137.036 # fine structure constant
     rot_angle = A*a_em
@@ -59,7 +87,7 @@ def rotationFromSingleCircularString(N, A, r, shift, parity):
     return a
 
 def rotationFromCircularStrings(N, A, r, n):
-    shifts = np.random.random((n, 2)) * (N + 2*r) - r # random circle centres
+    shifts = np.array([sampleRoundedSquare(N, r) for _ in range(n)]) # random circle centres
     parities = np.random.randint(0, 2, n) * 2 - 1 # random +-1
     a = np.zeros((N, N))
     for i in range(n):
@@ -752,21 +780,25 @@ class Estimator:
         denom = [(1/C_XX_t/c/d**2, 1/C_YY_t/d**2)] # convert to discrete Fourier before FFT
         return expandProd(lmask, denom, f, f)
 
-    def evaluateQE(self, XY, lmin, lmax):
+    def evaluateQE(self, XY, lmin, lmax, norm=None):
         '''
         Evaluate the XY lensing estimator as a CMBMap.
+
+        norm : (N, N//2+1) real
+            Pre-computed estimator reconstruction noise
         '''
         unnorm_qe_terms = self.unnormQETerms(XY, lmin, lmax)
         norm_terms = self.normTerms(XY, lmin, lmax)
         unnorm_qe = convolveFull(unnorm_qe_terms, self.ls)[:,:self.N//2+1]
         self.unnorm_qe[XY] = unnorm_qe
-        norm = convolveFull(norm_terms, self.ls).real[:,:self.N//2+1] * self.d**2 # convert from discrete Fourier to continuous
+        if norm is None:
+            norm = convolveFull(norm_terms, self.ls).real[:,:self.N//2+1] * self.d**2 # convert from discrete Fourier to continuous
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             noise = np.nan_to_num(1/norm, posinf=0) # fix /0
             self.noise[XY] = noise
             norm_qe = unnorm_qe * noise
-            norm_qe_r = np.fft.irfft2(norm_qe).real
+            norm_qe_r = np.fft.irfft2(norm_qe)
         return CMBMap(self.d, self.N, real=norm_qe_r)
 
     def plotNoise(self, XY, lmin, lmax, delta=20, **kwargs):
